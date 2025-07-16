@@ -650,7 +650,7 @@ initial_random_points_info_div = Div(text="", styles={'margin-top': '10px'})
 objective_header = Div(text=f"<b>{objective_name_input.value}</b>", width=80, styles={'text-align': 'center'})
 initial_data_header_row = row(objective_header, *initial_data_headers, sizing_mode="stretch_width", visible=False)
 
-MAX_INITIAL_POINTS = 1000
+MAX_INITIAL_POINTS = 100
 initial_data_rows, initial_param_inputs, initial_objective_inputs = [], [], []
 for i in range(MAX_INITIAL_POINTS):
     default_low = param_low_spinners[0].value
