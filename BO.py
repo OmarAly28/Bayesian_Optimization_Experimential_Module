@@ -408,20 +408,13 @@ def process_and_plot_latest_results():
     best_x = experiment_history[best_idx][0]
     best_y_display = -best_y_internal if maximize_objective else best_y_internal
 
-    # Tolerance check for both minimization and maximization
-    tolerance_reached = False
-    if (not maximize_objective and best_y_display < TOLERANCE) or \
-       (maximize_objective and best_y_display > (1 - TOLERANCE)):
-        tolerance_reached = True
-        update_status(f"✅ Optimum reached! (Value {'<' if not maximize_objective else '>'} {TOLERANCE:.0e})", is_error=False)
-
+    # REMOVED: Tolerance reached check and message
+    # This was causing incorrect "optimum reached" messages
+    
     results_html = f"<h3>Current Best: {best_y_display:.6f}</h3><ul>"
     for name, value in zip(param_names, best_x):
         results_html += f"<li><b>{name}:</b> {value:.6f}</li>"
     results_html += "</ul>"
-    
-    if tolerance_reached:
-        results_html += f"<div style='color:green; font-weight:bold;'>✓ Optimum reached (value {'<' if not maximize_objective else '>'} {TOLERANCE:.0e})</div>"
         
     best_result_div.text = results_html
 
