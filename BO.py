@@ -41,11 +41,14 @@ maximize_objective = True
 experiment_history = []
 suggested_x = None
 TOLERANCE = 1e-4    # Stopping threshold
-initial_loaded_data = [] # Global list to store parsed CSV data
 
 # --- Bokeh Application Setup ---
 doc = curdoc()
 doc.title = "Interactive Optimizer"
+
+# --- Constants ---
+MAX_PARAMS = 20
+MAX_INITIAL_POINTS = 200
 
 # --- Data Sources ---
 experiments_source = ColumnDataSource(data=dict(Iteration=[], Objective=[]))
@@ -67,7 +70,6 @@ def set_ui_state(phase='setup', lock_all=False):
 
     reset_button.disabled = is_setup
     submit_result_button.disabled = True
-    # Enable/disable CSV upload based on setup phase
     csv_file_input.disabled = not is_setup
 
 def update_direction_indicator():
@@ -81,13 +83,16 @@ def update_direction_indicator():
 
 def on_num_params_change(attr, old, new):
     """Shows/hides parameter definition rows and updates initial data rows."""
+    num_params = int(new)
     for i in range(MAX_PARAMS):
-        param_rows[i].visible = (i < new)
-        initial_data_headers[i].visible = (i < new)
-        if i < new:
+        param_rows[i].visible = (i < num_params)
+        initial_data_headers[i].visible = (i < num_params)
+        if i < num_params:
             on_param_range_change(i, None, None, None)
-    # Ensure initial data rows are updated based on spinner value
-    on_initial_data_change(None, None, initial_data_spinner.value) 
+    
+    # Update initial data UI
+    num_initial_points = initial_data_spinner.value or 0
+    on_initial_data_change(None, None, num_initial_points)
     update_initial_random_points_info()
 
 def on_initial_data_change(attr, old, new):
@@ -95,6 +100,7 @@ def on_initial_data_change(attr, old, new):
     num_to_show = new or 0
     initial_data_header_row.visible = (num_to_show > 0)
     active_param_indices = [i for i in range(num_params_spinner.value)]
+    
     for i in range(MAX_INITIAL_POINTS):
         row_visible = i < num_to_show
         initial_data_rows[i].visible = row_visible
@@ -146,11 +152,10 @@ def update_initial_points_warning(num_points=0):
 def update_initial_random_points_info():
     """Updates the info div about the number of initial random points."""
     num_params = num_params_spinner.value
-    num_initial_data = initial_data_spinner.value
+    num_initial_data = initial_data_spinner.value if initial_data_spinner.value is not None else 0 
     
     # Calculate the effective n_initial_points that skopt will use
     effective_initial_random_points = max(5, 2 * num_params, num_initial_data)
-
     
     info_text = f"""
     <p style="font-size: 0.9em; color: #555;">
@@ -164,28 +169,27 @@ def update_initial_random_points_info():
     """
     initial_random_points_info_div.text = info_text
 
-
 def lock_in_setup():
     """Reads all setup widgets, creates the Optimizer, and transitions the UI."""
-    global initial_loaded_data # Access the global variable
     update_status("🔄 Initializing...")
     doc.add_next_tick_callback(lambda: set_ui_state(lock_all=True))
 
     try:
+        num_params_val = num_params_spinner.value
+        num_initial_data_val = initial_data_spinner.value or 0
+        
         config = {
-            "num_params": num_params_spinner.value,
+            "num_params": num_params_val,
             "objective_name": objective_name_input.value or "Objective",
             "maximize": objective_type_select.active == 0,
             "surrogate_model": surrogate_select.value,
             "acq_func": acq_func_select.value,
-            "num_initial_data": initial_data_spinner.value, # This value is set by CSV upload or manual input
             "params": [],
-            "initial_data": [] # This will be populated from initial_loaded_data
+            "initial_data": []
         }
 
-        # IMPROVEMENT: Make n_initial_points more robust based on num_params
-        # This ensures better initial exploration for higher-dimensional problems.
-        config["initial_random_points"] = max(5, 2 * config["num_params"], config["num_initial_data"])
+        # Make n_initial_points more robust
+        config["initial_random_points"] = max(5, 2 * config["num_params"], num_initial_data_val)
 
         p_names_check = set()
         for i in range(config["num_params"]):
@@ -204,12 +208,21 @@ def lock_in_setup():
         if not config["params"]:
             raise ValueError("At least one parameter must be defined.")
 
-        # Use the globally stored initial_loaded_data directly for the optimizer
-        # This bypasses potential timing issues with reading from UI spinners
-        config["initial_data"] = list(initial_loaded_data) # Create a copy
-
-        print(f"DEBUG: In lock_in_setup - config['initial_data'] before optimizer.tell: {config['initial_data']}")
-
+        # Collect initial data from UI
+        for i in range(num_initial_data_val):
+            obj_val = initial_objective_inputs[i].value
+            if obj_val is None:
+                continue
+                
+            x_vals = []
+            for j in range(num_params_val):
+                val = initial_param_inputs[i][j].value
+                if val is None:
+                    break
+                x_vals.append(val)
+            else:
+                if len(x_vals) == num_params_val:
+                    config["initial_data"].append({"x": x_vals, "y": obj_val})
 
     except Exception as e:
         update_status(f"❌ Error: {e}", is_error=True)
@@ -242,7 +255,11 @@ def lock_in_setup():
                 data_table.columns = table_cols
             doc.add_next_tick_callback(update_table_cols)
 
-            model_map = {"GP": GaussianProcessRegressor(normalize_y=True), "RF": RandomForestRegressor(n_estimators=100), "ET": ExtraTreesRegressor(n_estimators=100)}
+            model_map = {
+                "GP": GaussianProcessRegressor(normalize_y=True), 
+                "RF": RandomForestRegressor(n_estimators=100), 
+                "ET": ExtraTreesRegressor(n_estimators=100)
+            }
 
             optimizer = Optimizer(
                 dimensions=dimensions,
@@ -255,19 +272,15 @@ def lock_in_setup():
 
             experiment_history = []
             initial_xs, initial_ys = [], []
-            if config["initial_data"]:
-                for point in config["initial_data"]:
-                    x, y = point["x"], point["y"]
-                    initial_xs.append(x)
-                    internal_y = -y if maximize_objective else y
-                    initial_ys.append(internal_y)
-                    experiment_history.append((x, internal_y))
+            for point in config["initial_data"]:
+                x, y = point["x"], point["y"]
+                initial_xs.append(x)
+                internal_y = -y if maximize_objective else y
+                initial_ys.append(internal_y)
+                experiment_history.append((x, internal_y))
 
+            if initial_xs:
                 optimizer.tell(initial_xs, initial_ys)
-                print(f"DEBUG: Optimizer told {len(initial_xs)} initial points.")
-            else:
-                print("DEBUG: No initial data provided to optimizer.")
-
 
             doc.add_next_tick_callback(lambda: update_status("🔄 Step 4/4: Finalizing setup..."))
 
@@ -277,10 +290,10 @@ def lock_in_setup():
 
                 if initial_xs:
                     new_data = {"Iteration": list(range(1, len(initial_xs) + 1))}
-                    new_data["Objective"] = [-y if maximize_objective else y for y in initial_ys]
+                    new_data["Objective"] = [point['y'] for point in config["initial_data"]]
                     for i, name in enumerate(param_names):
                         new_data[name] = [x[i] for x in initial_xs]
-                    experiments_source.stream(new_data)
+                    experiments_source.data = new_data
 
                 process_and_plot_latest_results()
                 update_initial_points_warning(len(experiment_history))
@@ -290,17 +303,14 @@ def lock_in_setup():
             doc.add_next_tick_callback(final_callback)
 
         except Exception as e:
-            # Pass the exception 'e' to the error_callback
             doc.add_next_tick_callback(partial(error_callback, e))
 
     threading.Thread(target=worker, args=(config,)).start()
 
-# Modified error_callback to accept the exception as an argument
 def error_callback(e):
     """Updates the status div with an error message."""
     update_status(f"❌ Error during worker execution: {e}", is_error=True)
     set_ui_state(phase='setup')
-
 
 def suggest_next_experiment():
     """Asks the optimizer for the next point and displays it with predictions."""
@@ -334,20 +344,16 @@ def suggest_next_experiment():
             uncertainty_val = np.std(ys) if len(ys) > 1 else 1.0
 
         expected_display_val = -expected_internal if maximize_objective else expected_internal
-        expected_display_str = f"{expected_display_val:.4f}"
-        uncertainty_str = f"{uncertainty_val:.4f}"
-        
-        # New: Clear direction-specific prediction label
         direction_label = "Maximum" if maximize_objective else "Minimum"
-
+        
         suggestion_html = f"<h5>💡 Suggested Experiment (Iteration {len(experiment_history)+1}):</h5>"
         suggestion_html += "<ul>"
         for name, val in zip(param_names, suggested_x):
             suggestion_html += f"<li><b>{name}:</b> {val:.4f}</li>"
         suggestion_html += "</ul>"
 
-        suggestion_html += f"<b>Predicted {direction_label}:</b> {expected_display_str}<br>"
-        suggestion_html += f"<b>Model Uncertainty:</b> {uncertainty_str}"
+        suggestion_html += f"<b>Predicted {direction_label}:</b> {expected_display_val:.4f}<br>"
+        suggestion_html += f"<b>Model Uncertainty:</b> {uncertainty_val:.4f}"
 
         suggestion_div.text = suggestion_html
         actual_result_input.disabled = False
@@ -355,18 +361,14 @@ def suggest_next_experiment():
         update_status("💡 Suggestion received. Please provide the result.")
 
     except Exception as e:
-        import traceback
-        print("--- ERROR IN suggest_next_experiment ---")
-        traceback.print_exc()
-        print("--------------------------------------")
         update_status(f"❌ An error occurred while suggesting an experiment: {e}", is_error=True)
-
 
 def submit_result():
     """Submits the experimental result to the optimizer and updates the display."""
     global suggested_x
     result_value = actual_result_input.value
-    if result_value is None or suggested_x is None: return
+    if result_value is None or suggested_x is None: 
+        return
 
     update_status("🔄 Updating model with new result...")
 
@@ -382,8 +384,11 @@ def submit_result():
     process_and_plot_latest_results()
     update_initial_points_warning(len(experiment_history))
 
-    suggestion_div.text, actual_result_input.value, suggested_x = "", None, None
-    actual_result_input.disabled, submit_result_button.disabled = True, True
+    suggestion_div.text = ""
+    actual_result_input.value = None
+    suggested_x = None
+    actual_result_input.disabled = True
+    submit_result_button.disabled = True
     update_status("✅ Model updated. Ready for the next suggestion.")
 
 def process_and_plot_latest_results():
@@ -392,7 +397,7 @@ def process_and_plot_latest_results():
         best_result_div.text = ""
         return
 
-    # Find the best result based on the internal (minimized) objective value
+    # Find the best result
     best_idx = 0
     best_y_internal = float('inf')
     for idx, (_, y_val) in enumerate(experiment_history):
@@ -403,11 +408,12 @@ def process_and_plot_latest_results():
     best_x = experiment_history[best_idx][0]
     best_y_display = -best_y_internal if maximize_objective else best_y_internal
 
-    # Check if we've reached the tolerance threshold
+    # Tolerance check for both minimization and maximization
     tolerance_reached = False
-    if not maximize_objective and best_y_display < TOLERANCE:
+    if (not maximize_objective and best_y_display < TOLERANCE) or \
+       (maximize_objective and best_y_display > (1 - TOLERANCE)):
         tolerance_reached = True
-        update_status(f"✅ Optimum reached! (Value < {TOLERANCE:.0e})", is_error=False)
+        update_status(f"✅ Optimum reached! (Value {'<' if not maximize_objective else '>'} {TOLERANCE:.0e})", is_error=False)
 
     results_html = f"<h3>Current Best: {best_y_display:.6f}</h3><ul>"
     for name, value in zip(param_names, best_x):
@@ -415,11 +421,11 @@ def process_and_plot_latest_results():
     results_html += "</ul>"
     
     if tolerance_reached:
-        results_html += f"<div style='color:green; font-weight:bold;'>✓ Optimum reached (value < {TOLERANCE:.0e})</div>"
+        results_html += f"<div style='color:green; font-weight:bold;'>✓ Optimum reached (value {'<' if not maximize_objective else '>'} {TOLERANCE:.0e})</div>"
         
     best_result_div.text = results_html
 
-    # More efficient convergence tracking
+    # Convergence tracking
     iters = list(range(1, len(experiment_history) + 1))
     best_values_so_far = []
     current_best = float('inf')
@@ -433,12 +439,14 @@ def process_and_plot_latest_results():
 
 def reset_all():
     """Resets the entire application state."""
-    global optimizer, param_names, dimensions, experiment_history, suggested_x, initial_loaded_data
+    global optimizer, param_names, dimensions, experiment_history, suggested_x
     optimizer, param_names, dimensions, experiment_history, suggested_x = None, [], [], [], None
-    initial_loaded_data = [] # Clear the loaded data on reset
 
     experiments_source.data = dict(Iteration=[], Objective=[])
-    data_table.columns = [TableColumn(field="Iteration", title="Iteration"), TableColumn(field="Objective", title="Objective")]
+    data_table.columns = [
+        TableColumn(field="Iteration", title="Iteration"),
+        TableColumn(field="Objective", title="Objective")
+    ]
     convergence_source.data = dict(iter=[], best_value=[])
 
     suggestion_div.text, best_result_div.text = "", ""
@@ -451,15 +459,16 @@ def reset_all():
     for i in range(MAX_PARAMS):
         initial_data_headers[i].text = f"<b>{param_name_inputs[i].value or f'Param {i+1}'}</b>"
 
+    # Reset all initial data inputs
+    initial_data_spinner.value = 0
+    for i in range(MAX_INITIAL_POINTS):
+        initial_objective_inputs[i].value = None
+        for j in range(MAX_PARAMS):
+            initial_param_inputs[i][j].value = None
+
     update_status("🟢 Ready. Define optimization problem.")
     set_ui_state(phase='setup')
     update_initial_random_points_info()
-    # Ensure initial data layout is hidden on reset
-    initial_data_spinner.value = 0 # Reset spinner value
-    initial_data_header_row.visible = False
-    for row_widget in initial_data_rows:
-        row_widget.visible = False
-
 
 def update_status(message, is_error=False):
     """Updates the status div with a message and optional error styling."""
@@ -483,17 +492,11 @@ def handle_csv_upload(attr, old, new):
     """
     Handles the uploaded CSV file, parses it, and populates the initial data fields.
     """
-    global initial_loaded_data # Access the global variable
     if not new:
-        print("DEBUG: No new CSV file selected. Clearing initial data display.")
-        update_status("No CSV file selected.", is_error=False)
-        initial_loaded_data = [] # Clear global data
-        initial_data_spinner.value = 0
-        doc.add_next_tick_callback(partial(on_initial_data_change, 'value', None, 0)) # Ensure UI hides
         return
 
     try:
-        # Decode base64 content to string, handling BOM
+        # Decode base64 content
         decoded_csv_content = base64.b64decode(new).decode('utf-8-sig')
         csv_data = io.StringIO(decoded_csv_content)
         reader = csv.reader(csv_data)
@@ -506,87 +509,69 @@ def handle_csv_upload(attr, old, new):
         obj_col_name = header[0].strip()
         csv_param_names = [name.strip() for name in header[1:]]
 
-        print(f"DEBUG: CSV Header - Objective: '{obj_col_name}', Parameters: {csv_param_names}")
-
         # Validate against current setup
         current_num_params = num_params_spinner.value
         current_param_names = [param_name_inputs[i].value.strip() for i in range(current_num_params)]
         current_obj_name = objective_name_input.value.strip()
 
-        print(f"DEBUG: Current UI Setup - Objective: '{current_obj_name}', Parameters: {current_param_names}")
-
-
-        if obj_col_name.lower() != current_obj_name.lower(): # Case-insensitive check
-            update_status(f"CSV header objective '{obj_col_name}' does not match '{current_obj_name}'. Please ensure objective name matches (case-insensitive).", is_error=True)
+        if obj_col_name.lower() != current_obj_name.lower():
+            update_status(f"CSV header objective '{obj_col_name}' does not match '{current_obj_name}'.", is_error=True)
             return
         
         if len(csv_param_names) != current_num_params:
-            update_status(f"CSV has {len(csv_param_names)} parameters, but current setup expects {current_num_params}. Please adjust 'Number of Input Parameters' or CSV.", is_error=True)
+            update_status(f"CSV has {len(csv_param_names)} parameters, but current setup expects {current_num_params}.", is_error=True)
             return
 
-        # Check if parameter names match (case-insensitive)
-        if not all(p_csv.lower() == p_setup.lower() for p_csv, p_setup in zip(csv_param_names, current_param_names)):
-            update_status("CSV parameter names do not match current setup. Please ensure order and names are identical (case-insensitive).", is_error=True)
-            return
+        # Check parameter names
+        for p_csv, p_setup in zip(csv_param_names, current_param_names):
+            if p_csv.lower() != p_setup.lower():
+                update_status("CSV parameter names do not match current setup.", is_error=True)
+                return
 
-        temp_parsed_data = [] # Use a temporary list
+        parsed_data = []
         for i, row_data in enumerate(reader):
             if not row_data:
-                continue # Skip empty rows
+                continue
             if len(row_data) != len(header):
-                update_status(f"Row {i+2} has incorrect number of columns. Expected {len(header)}, got {len(row_data)}.", is_error=True)
+                update_status(f"Row {i+2} has incorrect number of columns.", is_error=True)
                 return
 
             try:
                 obj_value = float(row_data[0])
                 param_values = [float(v) for v in row_data[1:]]
-                temp_parsed_data.append({"x": param_values, "y": obj_value})
-            except ValueError:
-                update_status(f"Row {i+2} contains non-numeric data. All data values must be numbers.", is_error=True)
+                parsed_data.append({"x": param_values, "y": obj_value})
+            except ValueError as ve:
+                update_status(f"Row {i+2} contains non-numeric data: {ve}", is_error=True)
                 return
         
-        if not temp_parsed_data:
+        if not parsed_data:
             update_status("No valid data rows found in CSV.", is_error=True)
             return
 
-        if len(temp_parsed_data) > MAX_INITIAL_POINTS:
-            update_status(f"CSV contains {len(temp_parsed_data)} data points, but only the first {MAX_INITIAL_POINTS} will be loaded due to UI limits.", is_error=False)
-            temp_parsed_data = temp_parsed_data[:MAX_INITIAL_POINTS]
+        if len(parsed_data) > MAX_INITIAL_POINTS:
+            update_status(f"CSV contains {len(parsed_data)} data points, only first {MAX_INITIAL_POINTS} loaded.", is_error=False)
+            parsed_data = parsed_data[:MAX_INITIAL_POINTS]
 
-        print(f"DEBUG: Parsed {len(temp_parsed_data)} data points from CSV.")
-        initial_loaded_data = temp_parsed_data # Assign to global variable
-
-        # First, reset all initial data input fields to None to clear previous values
+        # Reset previous data
         for i in range(MAX_INITIAL_POINTS):
             initial_objective_inputs[i].value = None
             for j in range(MAX_PARAMS):
                 initial_param_inputs[i][j].value = None
 
-        # Populate the individual spinners with parsed data for visual feedback
-        for i, data_point in enumerate(initial_loaded_data): # Use initial_loaded_data
+        # Populate UI with parsed data
+        for i, data_point in enumerate(parsed_data):
             initial_objective_inputs[i].value = data_point["y"]
             for j, val in enumerate(data_point["x"]):
                 initial_param_inputs[i][j].value = val
         
-        # Set the spinner value last, which should trigger on_initial_data_change
-        # This order ensures the values are present when visibility is updated.
-        initial_data_spinner.value = len(initial_loaded_data)
+        # Set spinner value and update UI
+        initial_data_spinner.value = len(parsed_data)
+        doc.add_next_tick_callback(partial(on_initial_data_change, 'value', None, len(parsed_data)))
 
-        # Explicitly call on_initial_data_change to ensure UI elements are visible
-        # Use doc.add_next_tick_callback to ensure this runs after values are set.
-        doc.add_next_tick_callback(partial(on_initial_data_change, 'value', None, initial_data_spinner.value))
-
-        update_status(f"✅ Successfully loaded {len(initial_loaded_data)} data points from CSV.", is_error=False)
+        update_status(f"✅ Successfully loaded {len(parsed_data)} data points from CSV.", is_error=False)
         
-        # Removed: csv_file_input.value = None as it's a readonly property
-
     except Exception as e:
-        import traceback
-        print("--- ERROR IN handle_csv_upload ---")
-        traceback.print_exc()
-        print("----------------------------------")
         update_status(f"❌ Error processing CSV: {e}", is_error=True)
-
 
 # --- UI Widget Definitions ---
 setup_title = Div(text="<h2>1. Define Optimization Problem</h2>")
@@ -594,7 +579,7 @@ num_params_spinner = Spinner(title="Number of Input Parameters", low=1, high=20,
 objective_name_input = TextInput(title="Objective Name (e.g., Yield, Purity):", value="Objective")
 objective_type_select = RadioButtonGroup(labels=["Maximize", "Minimize"], active=0)
 
-# NEW: Direction indicator next to objective name
+# Direction indicator
 direction_indicator = Div(text="(Maximizing)", styles={
     'color': 'green',
     'font-style': 'italic',
@@ -602,7 +587,6 @@ direction_indicator = Div(text="(Maximizing)", styles={
     'margin-left': '10px'
 })
 
-MAX_PARAMS = 20
 param_rows, param_name_inputs, param_low_spinners, param_high_spinners = [], [], [], []
 initial_data_headers = []
 
@@ -620,15 +604,13 @@ for i in range(MAX_PARAMS):
     initial_data_headers.append(header_div)
 
     name_input.on_change('value', partial(on_param_name_change, i))
-    
     low_spinner.on_change('value', partial(on_param_range_change, i))
     high_spinner.on_change('value', partial(on_param_range_change, i))
 
-
 initial_data_title = Div(text="<h4>Enter Existing Experimental Data (Recommended)</h4>")
-initial_data_spinner = Spinner(title="Number of existing data points:", low=0, high=10, step=1, value=0, width=200)
+initial_data_spinner = Spinner(title="Number of existing data points:", low=0, high=MAX_INITIAL_POINTS, step=1, value=0, width=200)
 
-# NEW: CSV File Input
+# CSV File Input
 csv_file_input = FileInput(
     accept=".csv",
     multiple=False,
@@ -643,14 +625,12 @@ warning_text = """
 """
 initial_points_warning_div = Div(text=warning_text, visible=False)
 
-# NEW: Div to inform about initial random points strategy
+# Div to inform about initial random points strategy
 initial_random_points_info_div = Div(text="", styles={'margin-top': '10px'})
-
 
 objective_header = Div(text=f"<b>{objective_name_input.value}</b>", width=80, styles={'text-align': 'center'})
 initial_data_header_row = row(objective_header, *initial_data_headers, sizing_mode="stretch_width", visible=False)
 
-MAX_INITIAL_POINTS = 100
 initial_data_rows, initial_param_inputs, initial_objective_inputs = [], [], []
 for i in range(MAX_INITIAL_POINTS):
     default_low = param_low_spinners[0].value
@@ -681,7 +661,7 @@ reset_button = Button(label="Reset Experiment", button_type="danger", width=400)
 
 initial_data_layout = column(
     initial_data_title,
-    row(initial_data_spinner, csv_file_input), # Placed CSV input next to spinner
+    row(initial_data_spinner, csv_file_input),
     initial_points_warning_div,
     initial_random_points_info_div,
     initial_data_header_row,
@@ -691,7 +671,7 @@ initial_data_layout = column(
 setup_widgets = [
     num_params_spinner, objective_name_input, objective_type_select,
     surrogate_select, acq_func_select, lock_setup_button, initial_data_spinner,
-    csv_file_input # Added to setup widgets for state management
+    csv_file_input
 ] + param_name_inputs + param_low_spinners + param_high_spinners + [
     item for sublist in initial_param_inputs for item in sublist
 ] + initial_objective_inputs
@@ -704,9 +684,8 @@ objective_name_input.on_change('value', on_objective_name_change)
 num_params_spinner.on_change('value', on_num_params_change)
 initial_data_spinner.on_change('value', on_initial_data_change)
 surrogate_select.on_change('value', on_surrogate_model_change)
-csv_file_input.on_change('value', handle_csv_upload) # Attach CSV upload handler
+csv_file_input.on_change('value', handle_csv_upload)
 
-# NEW: Direction indicator callback
 def on_objective_type_change(attr, old, new):
     global maximize_objective
     maximize_objective = (new == 0)
@@ -746,7 +725,7 @@ def on_doc_ready(event):
     update_initial_random_points_info()
     update_direction_indicator()
     # Ensure initial data layout is hidden on initial load
-    initial_data_spinner.value = 0 # Reset spinner value
+    initial_data_spinner.value = 0
     initial_data_header_row.visible = False
     for row_widget in initial_data_rows:
         row_widget.visible = False
