@@ -28,7 +28,7 @@ from bokeh.models import (
     NumberFormatter,
     ColumnDataSource,
     FileInput,
-    CustomJS, # <--- ADDED FOR CSV DOWNLOAD
+    CustomJS,
 )
 
 # --- Suppress scikit-optimize warnings ---
@@ -71,7 +71,7 @@ def set_ui_state(phase='setup', lock_all=False):
 
     reset_button.disabled = is_setup
     submit_result_button.disabled = True
-    csv_file_input.disabled = not is_setup # This will be managed by recreating the widget
+    csv_file_input.disabled = not is_setup
 
 
 def update_direction_indicator():
@@ -117,6 +117,9 @@ def on_objective_name_change(attr, old, new):
     """Updates the initial data header for the objective column in real-time."""
     objective_header.text = f"<b>{new or 'Objective'}</b>"
     update_direction_indicator()
+    # When objective name changes, it might affect the column header in the DataTable,
+    # so we need to trigger a DataTable columns update.
+    # This will be handled by re-initializing the optimizer when setup is locked in.
 
 def on_param_name_change(index, attr, old, new):
     """Updates a specific parameter header in the initial data section in real-time."""
@@ -245,7 +248,7 @@ def lock_in_setup():
             ]
             for name in p_names:
                 table_cols.append(TableColumn(field=name, title=name, formatter=NumberFormatter(format="0.0000")))
-            # Add objective LAST
+            # Add objective LAST, using the actual objective name from config
             table_cols.append(TableColumn(field="Objective", title=config['objective_name'], formatter=NumberFormatter(format="0.0000")))
 
             doc.add_next_tick_callback(lambda: update_status("🔄 Step 2/4: Initializing optimizer model..."))
@@ -290,18 +293,19 @@ def lock_in_setup():
 
             def final_callback():
                 # Initialize new_cols with all dynamic parameter names
-                new_cols = {name: [] for name in param_names}
-                # Ensure 'Iteration' and 'Objective' fields are present
-                new_cols['Iteration'] = []
-                new_cols['Objective'] = []
-                experiments_source.data.update(new_cols) # Update data source with all column keys
-
+                # It's important to set up all keys in the source initially
+                initial_source_data = {'Iteration': [], 'Objective': []}
+                for name in param_names:
+                    initial_source_data[name] = []
+                experiments_source.data = initial_source_data # Reset with all potential keys
+                
+                # If there's initial data, populate it
                 if initial_xs:
                     new_data = {"Iteration": list(range(1, len(initial_xs) + 1))}
                     new_data["Objective"] = [point['y'] for point in config["initial_data"]]
                     for i, name in enumerate(param_names):
                         new_data[name] = [x[i] for x in initial_xs]
-                    experiments_source.data = new_data
+                    experiments_source.data = new_data # Update with actual data
 
                 process_and_plot_latest_results()
                 update_initial_points_warning(len(experiment_history))
@@ -384,9 +388,11 @@ def submit_result():
     optimizer.tell(suggested_x, internal_result)
     experiment_history.append((suggested_x, internal_result))
 
+    # Prepare new_data for streaming, ensuring all parameter columns are included
     new_data = {"Iteration": [len(experiment_history)], "Objective": [result_value]}
     for i, name in enumerate(param_names):
         new_data[name] = [suggested_x[i]]
+
     experiments_source.stream(new_data)
 
     process_and_plot_latest_results()
@@ -408,13 +414,18 @@ def process_and_plot_latest_results():
     # Find the best result
     best_idx = 0
     best_y_internal = float('inf')
-    for idx, (_, y_val) in enumerate(experiment_history):
-        if y_val < best_y_internal:
-            best_y_internal = y_val
+    # Use actual objective value for comparison, taking into account maximization
+    current_best_objective = -float('inf') if maximize_objective else float('inf')
+
+    for idx, (x_val, y_internal) in enumerate(experiment_history):
+        y_display = -y_internal if maximize_objective else y_internal
+        if (maximize_objective and y_display > current_best_objective) or \
+           (not maximize_objective and y_display < current_best_objective):
+            current_best_objective = y_display
             best_idx = idx
 
     best_x = experiment_history[best_idx][0]
-    best_y_display = -best_y_internal if maximize_objective else best_y_internal
+    best_y_display = -experiment_history[best_idx][1] if maximize_objective else experiment_history[best_idx][1]
 
     results_html = f"<h3>Current Best: {best_y_display:.6f}</h3><ul>"
     for name, value in zip(param_names, best_x):
@@ -426,12 +437,15 @@ def process_and_plot_latest_results():
     # Convergence tracking
     iters = list(range(1, len(experiment_history) + 1))
     best_values_so_far = []
-    current_best = float('inf')
-    for _, y_val in experiment_history:
-        if y_val < current_best:
-            current_best = y_val
-        display_val = -current_best if maximize_objective else current_best
-        best_values_so_far.append(display_val)
+    
+    # Re-calculate current_best based on display values for the plot
+    current_best_plot = -float('inf') if maximize_objective else float('inf')
+    for _, y_val_internal in experiment_history:
+        y_val_display = -y_val_internal if maximize_objective else y_val_internal
+        if (maximize_objective and y_val_display > current_best_plot) or \
+           (not maximize_objective and y_val_display < current_best_plot):
+            current_best_plot = y_val_display
+        best_values_so_far.append(current_best_plot) # Append current best for plot
 
     convergence_source.data = {'iter': iters, 'best_value': best_values_so_far}
 
@@ -440,10 +454,11 @@ def reset_all():
     global optimizer, param_names, dimensions, experiment_history, suggested_x, csv_file_input
     optimizer, param_names, dimensions, experiment_history, suggested_x = None, [], [], [], None
 
-    experiments_source.data = dict(Iteration=[], Objective=[])
-    data_table.columns = [
+    # Reset data sources
+    experiments_source.data = dict(Iteration=[], Objective=[]) # Initial minimal columns
+    data_table.columns = [ # Reset DataTable columns to default
         TableColumn(field="Iteration", title="Iteration"),
-        TableColumn(field="Objective", title="Objective") # Default, will be updated by lock_in_setup
+        TableColumn(field="Objective", title="Objective")
     ]
     convergence_source.data = dict(iter=[], best_value=[])
 
@@ -453,11 +468,12 @@ def reset_all():
     update_initial_points_warning(0)
     update_direction_indicator()
 
+    # Reset visual headers based on current input values (before user might change them)
     objective_header.text = f"<b>{objective_name_input.value or 'Objective'}</b>"
     for i in range(MAX_PARAMS):
         initial_data_headers[i].text = f"<b>{param_name_inputs[i].value or f'Param {i+1}'}</b>"
 
-    # Reset all initial data inputs
+    # Reset all initial data input spinners
     initial_data_spinner.value = 0
     for i in range(MAX_INITIAL_POINTS):
         initial_objective_inputs[i].value = None
@@ -647,7 +663,7 @@ initial_random_points_info_div = Div(text="", styles={'margin-top': '10px'})
 
 objective_header = Div(text=f"<b>{objective_name_input.value}</b>", width=80, styles={'text-align': 'center'})
 
-# CHANGE: Parameters first, objective last in header
+# Initial definition of header row for data entry, Parameters first, objective last
 initial_data_header_row = row(*initial_data_headers, objective_header, sizing_mode="stretch_width", visible=False)
 
 initial_data_rows, initial_param_inputs, initial_objective_inputs = [], [], []
@@ -726,37 +742,46 @@ suggest_button.on_click(suggest_next_experiment)
 submit_result_button.on_click(submit_result)
 reset_button.on_click(reset_all)
 
-# CustomJS for CSV download button - FIX 2: Updated to correctly get all columns and sort
-download_csv_button.js_on_click(CustomJS(args=dict(source=experiments_source, columns=data_table.columns, maximize=maximize_objective), code="""
+# CustomJS for CSV download button - Re-FIXED: Dynamically gets columns from source.data keys
+download_csv_button.js_on_click(CustomJS(args=dict(source=experiments_source, maximize=maximize_objective, obj_name_input=objective_name_input), code="""
     const data = source.data;
-    const columns_meta = columns; // DataTable.columns holds title and field
     const file_name = 'experiment_data.csv';
-    const is_maximizing = maximize; // Pass maximization flag from Python
+    const is_maximizing = maximize;
+    const objective_actual_name = obj_name_input.value || 'Objective'; // Get actual objective name
 
     let csv_content = "";
 
-    // Get header from DataTable columns, using the 'title' for the header row
-    const header_titles = [];
-    const header_fields = []; // Also store fields to access data source correctly
-    for (let i = 0; i < columns_meta.length; i++) {
-        header_titles.push(columns_meta[i].title);
-        header_fields.push(columns_meta[i].field);
-    }
+    // Dynamically get all unique keys (column fields) from the data source
+    let all_fields = Object.keys(data);
+    
+    // Remove "Iteration" and "Objective" (which is now dynamic) from the list temporarily
+    const iteration_field = "Iteration";
+    const objective_field = "Objective"; // This field is fixed in the ColumnDataSource
+
+    const parameter_fields = all_fields.filter(field => 
+        field !== iteration_field && field !== objective_field
+    );
+
+    // Construct header titles in desired order: Iteration, Parameters, Objective
+    const header_titles = [iteration_field, ...parameter_fields, objective_actual_name];
+    // Construct header fields (which are the actual keys in source.data)
+    const header_fields_ordered = [iteration_field, ...parameter_fields, objective_field];
+
     csv_content += header_titles.join(",") + "\\n";
 
     // Prepare rows for sorting
     const all_rows = [];
-    // Ensure we correctly get the number of rows from a reliable column (e.g., 'Iteration')
-    const num_rows = data['Iteration'] ? data['Iteration'].length : 0; 
+    const num_rows = data[iteration_field] ? data[iteration_field].length : 0; 
 
     for (let i = 0; i < num_rows; i++) {
         const row_values_obj = {}; // Stores raw values for sorting
         const row_display_values = []; // Stores formatted values for CSV string
-        for (let j = 0; j < header_fields.length; j++) {
-            const col_field = header_fields[j];
+
+        for (let j = 0; j < header_fields_ordered.length; j++) {
+            const col_field = header_fields_ordered[j];
             let value = data[col_field][i];
             
-            // Store raw value for sorting
+            // Store raw value for sorting (using the fixed 'Objective' field name)
             row_values_obj[col_field] = value;
 
             // Format for CSV output
@@ -777,20 +802,11 @@ download_csv_button.js_on_click(CustomJS(args=dict(source=experiments_source, co
         });
     }
 
-    // Sort rows by Objective (which should now be the last column)
-    // Find the actual field name of the objective column dynamically
-    let objective_field_name_for_sort = null;
-    for (let i = 0; i < columns_meta.length; i++) {
-        if (columns_meta[i].field === "Objective") {
-            objective_field_name_for_sort = columns_meta[i].field;
-            break;
-        }
-    }
-
-    if (objective_field_name_for_sort && all_rows.length > 0) { // Only sort if objective field found and data exists
+    // Sort rows by Objective
+    if (all_rows.length > 0) { 
         all_rows.sort((a, b) => {
-            const objA = a.raw[objective_field_name_for_sort];
-            const objB = b.raw[objective_field_name_for_sort];
+            const objA = a.raw[objective_field]; // Use the fixed 'Objective' field for sorting
+            const objB = b.raw[objective_field];
             if (is_maximizing) {
                 return objB - objA; // Descending for maximization
             } else {
