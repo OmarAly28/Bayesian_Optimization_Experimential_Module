@@ -498,9 +498,9 @@ def handle_csv_upload(attr, old, new):
         if not header:
             raise ValueError("CSV file is empty or missing header row.")
 
-        # Assume first column is objective, rest are parameters
-        obj_col_name = header[0].strip()
-        csv_param_names = [name.strip() for name in header[1:]]
+        # CHANGE: Last column is objective, rest are parameters
+        obj_col_name = header[-1].strip()  # Last column is objective
+        csv_param_names = [name.strip() for name in header[:-1]]  # All except last are parameters
 
         # Validate against current setup
         current_num_params = num_params_spinner.value
@@ -530,8 +530,9 @@ def handle_csv_upload(attr, old, new):
                 return
 
             try:
-                obj_value = float(row_data[0])
-                param_values = [float(v) for v in row_data[1:]]
+                # CHANGE: Last value is objective, rest are parameters
+                obj_value = float(row_data[-1])
+                param_values = [float(v) for v in row_data[:-1]]
                 parsed_data.append({"x": param_values, "y": obj_value})
             except ValueError as ve:
                 update_status(f"Row {i+2} contains non-numeric data: {ve}", is_error=True)
@@ -622,7 +623,9 @@ initial_points_warning_div = Div(text=warning_text, visible=False)
 initial_random_points_info_div = Div(text="", styles={'margin-top': '10px'})
 
 objective_header = Div(text=f"<b>{objective_name_input.value}</b>", width=80, styles={'text-align': 'center'})
-initial_data_header_row = row(objective_header, *initial_data_headers, sizing_mode="stretch_width", visible=False)
+
+# CHANGE: Parameters first, objective last in header
+initial_data_header_row = row(*initial_data_headers, objective_header, sizing_mode="stretch_width", visible=False)
 
 initial_data_rows, initial_param_inputs, initial_objective_inputs = [], [], []
 for i in range(MAX_INITIAL_POINTS):
@@ -632,7 +635,8 @@ for i in range(MAX_INITIAL_POINTS):
     obj_input = Spinner(width=80, step=0.01, value=None)
     initial_param_inputs.append(param_inputs)
     initial_objective_inputs.append(obj_input)
-    initial_data_rows.append(row(obj_input, *param_inputs, sizing_mode="stretch_width", visible=False))
+    # CHANGE: Parameters first, objective last in each row
+    initial_data_rows.append(row(*param_inputs, obj_input, sizing_mode="stretch_width", visible=False))
 
 model_title = Div(text="<h4>Model Configuration</h4>")
 surrogate_select = Select(title="Surrogate Model:", value="GP", options=["GP", "RF", "ET"])
