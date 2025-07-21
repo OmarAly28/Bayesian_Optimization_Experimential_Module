@@ -216,7 +216,7 @@ def lock_in_setup():
         # Collect initial data from UI
         for i in range(num_initial_data_val):
             obj_val = initial_objective_inputs[i].value
-            if obj_val is None:
+            if obj_val == None:
                 continue
                 
             x_vals = []
@@ -651,9 +651,18 @@ csv_file_input = FileInput(
     width=200
 )
 
+# NEW: Div for CSV format instruction
+csv_format_instruction = Div(text="""
+    <p style="font-size: 0.9em; color: #555;">
+    <b>CSV Format:</b> Your CSV should have input parameters starting from the first column and first row as headers,
+    and the optimized/objective variable must be in the last column of the file. Each row represents a single experiment.
+    </p>
+""", styles={'margin-top': '5px', 'margin-bottom': '10px'})
+
+
 warning_text = """
 <p style="color: #856404; background-color: #FFF3CD; border: 1px solid #FFEEBA; padding: 10px; border-radius: 5px;">
-⚠️ <b>Note:</b> It is recommended to have at least five entered data points. Model performance may be poor with fewer points.
+⚠️ <b>Note:</b> It is recommended to have at least 2 * number of variables as entered data points. Model performance may be poor with fewer points.
 </p>
 """
 initial_points_warning_div = Div(text=warning_text, visible=False)
@@ -702,7 +711,8 @@ download_csv_button = Button(label="Download Experiment Data (CSV)", button_type
 # Layout for initial data, needs to be re-created if csv_file_input is replaced
 initial_data_layout = column(
     initial_data_title,
-    row(initial_data_spinner, csv_file_input), # This row will be updated in reset_all
+    row(initial_data_spinner, csv_file_input),
+    csv_format_instruction, # <--- ADDED THIS LINE
     initial_points_warning_div,
     initial_random_points_info_div,
     initial_data_header_row,
@@ -716,8 +726,10 @@ setup_widgets = [
     item for sublist in initial_param_inputs for item in sublist
 ] + initial_objective_inputs
 
-# Add the row containing csv_file_input to setup_widgets for correct disabling
-setup_widgets.append(initial_data_layout.children[1])
+# Add the row containing csv_file_input (which is the second child of initial_data_layout)
+# and the new csv_format_instruction to setup_widgets for correct disabling
+setup_widgets.append(initial_data_layout.children[1]) # row(initial_data_spinner, csv_file_input)
+setup_widgets.append(csv_format_instruction) # The new instruction div
 
 
 optimization_widgets = [suggest_button, actual_result_input, submit_result_button]
@@ -742,7 +754,7 @@ suggest_button.on_click(suggest_next_experiment)
 submit_result_button.on_click(submit_result)
 reset_button.on_click(reset_all)
 
-# CustomJS for CSV download button - Re-FIXED: Dynamically gets columns from source.data keys
+# CustomJS for CSV download button
 download_csv_button.js_on_click(CustomJS(args=dict(source=experiments_source, maximize=maximize_objective, obj_name_input=objective_name_input), code="""
     const data = source.data;
     const file_name = 'experiment_data.csv';
@@ -850,7 +862,7 @@ controls_col = column(
 )
 
 # Update the results_col layout to include the download button
-results_col = column(best_result_div, data_table, download_csv_button, p_conv) # Added download_csv_button
+results_col = column(best_result_div, data_table, download_csv_button, p_conv)
 
 main_layout = row(controls_col, results_col)
 
