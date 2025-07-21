@@ -28,6 +28,7 @@ from bokeh.models import (
     NumberFormatter,
     ColumnDataSource,
     FileInput,
+    CustomJS, # <--- ADDED FOR CSV DOWNLOAD
 )
 
 # --- Suppress scikit-optimize warnings ---
@@ -70,7 +71,8 @@ def set_ui_state(phase='setup', lock_all=False):
 
     reset_button.disabled = is_setup
     submit_result_button.disabled = True
-    csv_file_input.disabled = not is_setup
+    csv_file_input.disabled = not is_setup # This will be managed by recreating the widget
+
 
 def update_direction_indicator():
     """Updates the direction indicator text based on current setting"""
@@ -237,12 +239,14 @@ def lock_in_setup():
             dims = [Real(p['low'], p['high'], name=p['name']) for p in config['params']]
             p_names = [p['name'] for p in config['params']]
 
+            # FIX 1: Construct table_cols with Objective as the last column
             table_cols = [
                 TableColumn(field="Iteration", title="Iteration"),
-                TableColumn(field="Objective", title=config['objective_name'], formatter=NumberFormatter(format="0.0000")),
             ]
             for name in p_names:
                 table_cols.append(TableColumn(field=name, title=name, formatter=NumberFormatter(format="0.0000")))
+            # Add objective LAST
+            table_cols.append(TableColumn(field="Objective", title=config['objective_name'], formatter=NumberFormatter(format="0.0000")))
 
             doc.add_next_tick_callback(lambda: update_status("🔄 Step 2/4: Initializing optimizer model..."))
 
@@ -285,8 +289,12 @@ def lock_in_setup():
             doc.add_next_tick_callback(lambda: update_status("🔄 Step 4/4: Finalizing setup..."))
 
             def final_callback():
+                # Initialize new_cols with all dynamic parameter names
                 new_cols = {name: [] for name in param_names}
-                experiments_source.data.update(new_cols)
+                # Ensure 'Iteration' and 'Objective' fields are present
+                new_cols['Iteration'] = []
+                new_cols['Objective'] = []
+                experiments_source.data.update(new_cols) # Update data source with all column keys
 
                 if initial_xs:
                     new_data = {"Iteration": list(range(1, len(initial_xs) + 1))}
@@ -408,9 +416,6 @@ def process_and_plot_latest_results():
     best_x = experiment_history[best_idx][0]
     best_y_display = -best_y_internal if maximize_objective else best_y_internal
 
-    # REMOVED: Tolerance reached check and message
-    # This was causing incorrect "optimum reached" messages
-    
     results_html = f"<h3>Current Best: {best_y_display:.6f}</h3><ul>"
     for name, value in zip(param_names, best_x):
         results_html += f"<li><b>{name}:</b> {value:.6f}</li>"
@@ -432,13 +437,13 @@ def process_and_plot_latest_results():
 
 def reset_all():
     """Resets the entire application state."""
-    global optimizer, param_names, dimensions, experiment_history, suggested_x
+    global optimizer, param_names, dimensions, experiment_history, suggested_x, csv_file_input
     optimizer, param_names, dimensions, experiment_history, suggested_x = None, [], [], [], None
 
     experiments_source.data = dict(Iteration=[], Objective=[])
     data_table.columns = [
         TableColumn(field="Iteration", title="Iteration"),
-        TableColumn(field="Objective", title="Objective")
+        TableColumn(field="Objective", title="Objective") # Default, will be updated by lock_in_setup
     ]
     convergence_source.data = dict(iter=[], best_value=[])
 
@@ -458,6 +463,24 @@ def reset_all():
         initial_objective_inputs[i].value = None
         for j in range(MAX_PARAMS):
             initial_param_inputs[i][j].value = None
+
+    # THE FIX for FileInput: Replace the FileInput widget instance to clear its state
+    new_csv_file_input = FileInput(
+        accept=".csv",
+        multiple=False,
+        title="Upload CSV Data",
+        width=200
+    )
+    # Re-attach its callback
+    new_csv_file_input.on_change('value', handle_csv_upload)
+    
+    # Update the global reference
+    csv_file_input = new_csv_file_input
+
+    # Find the row that contains the csv_file_input and replace its child
+    # Based on your layout, it's the second child (index 1) of initial_data_layout
+    initial_data_layout.children[1] = row(initial_data_spinner, csv_file_input)
+
 
     update_status("🟢 Ready. Define optimization problem.")
     set_ui_state(phase='setup')
@@ -604,7 +627,7 @@ for i in range(MAX_PARAMS):
 initial_data_title = Div(text="<h4>Enter Existing Experimental Data (Recommended)</h4>")
 initial_data_spinner = Spinner(title="Number of existing data points:", low=0, high=MAX_INITIAL_POINTS, step=1, value=0, width=200)
 
-# CSV File Input
+# CSV File Input (Initial Definition)
 csv_file_input = FileInput(
     accept=".csv",
     multiple=False,
@@ -651,14 +674,19 @@ submit_result_button = Button(label="Submit Result & Update Model", button_type=
 
 status_div = Div(text="🟢 Ready. Define optimization problem.")
 best_result_div = Div()
+# DataTable columns are dynamically set in lock_in_setup, so initial definition can be minimal
 data_table = DataTable(source=experiments_source, columns=[TableColumn(field="Iteration", title="Iteration"), TableColumn(field="Objective", title="Objective")], width=600, height=200, editable=False)
 p_conv = figure(height=300, width=600, title="Convergence Plot", x_axis_label="Iteration", y_axis_label="Best Objective Value")
 p_conv.line(x='iter', y='best_value', source=convergence_source, line_width=2)
 reset_button = Button(label="Reset Experiment", button_type="danger", width=400)
 
+# Add a new button for CSV download
+download_csv_button = Button(label="Download Experiment Data (CSV)", button_type="default", width=250)
+
+# Layout for initial data, needs to be re-created if csv_file_input is replaced
 initial_data_layout = column(
     initial_data_title,
-    row(initial_data_spinner, csv_file_input),
+    row(initial_data_spinner, csv_file_input), # This row will be updated in reset_all
     initial_points_warning_div,
     initial_random_points_info_div,
     initial_data_header_row,
@@ -668,10 +696,13 @@ initial_data_layout = column(
 setup_widgets = [
     num_params_spinner, objective_name_input, objective_type_select,
     surrogate_select, acq_func_select, lock_setup_button, initial_data_spinner,
-    csv_file_input
 ] + param_name_inputs + param_low_spinners + param_high_spinners + [
     item for sublist in initial_param_inputs for item in sublist
 ] + initial_objective_inputs
+
+# Add the row containing csv_file_input to setup_widgets for correct disabling
+setup_widgets.append(initial_data_layout.children[1])
+
 
 optimization_widgets = [suggest_button, actual_result_input, submit_result_button]
 all_buttons = [lock_setup_button, suggest_button, submit_result_button, reset_button]
@@ -681,6 +712,7 @@ objective_name_input.on_change('value', on_objective_name_change)
 num_params_spinner.on_change('value', on_num_params_change)
 initial_data_spinner.on_change('value', on_initial_data_change)
 surrogate_select.on_change('value', on_surrogate_model_change)
+# Initial attachment of the callback for csv_file_input
 csv_file_input.on_change('value', handle_csv_upload)
 
 def on_objective_type_change(attr, old, new):
@@ -694,6 +726,98 @@ suggest_button.on_click(suggest_next_experiment)
 submit_result_button.on_click(submit_result)
 reset_button.on_click(reset_all)
 
+# CustomJS for CSV download button - FIX 2: Updated to correctly get all columns and sort
+download_csv_button.js_on_click(CustomJS(args=dict(source=experiments_source, columns=data_table.columns, maximize=maximize_objective), code="""
+    const data = source.data;
+    const columns_meta = columns; // DataTable.columns holds title and field
+    const file_name = 'experiment_data.csv';
+    const is_maximizing = maximize; // Pass maximization flag from Python
+
+    let csv_content = "";
+
+    // Get header from DataTable columns, using the 'title' for the header row
+    const header_titles = [];
+    const header_fields = []; // Also store fields to access data source correctly
+    for (let i = 0; i < columns_meta.length; i++) {
+        header_titles.push(columns_meta[i].title);
+        header_fields.push(columns_meta[i].field);
+    }
+    csv_content += header_titles.join(",") + "\\n";
+
+    // Prepare rows for sorting
+    const all_rows = [];
+    // Ensure we correctly get the number of rows from a reliable column (e.g., 'Iteration')
+    const num_rows = data['Iteration'] ? data['Iteration'].length : 0; 
+
+    for (let i = 0; i < num_rows; i++) {
+        const row_values_obj = {}; // Stores raw values for sorting
+        const row_display_values = []; // Stores formatted values for CSV string
+        for (let j = 0; j < header_fields.length; j++) {
+            const col_field = header_fields[j];
+            let value = data[col_field][i];
+            
+            // Store raw value for sorting
+            row_values_obj[col_field] = value;
+
+            // Format for CSV output
+            if (value === null || typeof value === 'undefined') {
+                value = ''; // Handle null or undefined values
+            } else if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\\n'))) {
+                // Enclose strings with special characters in double quotes and escape existing double quotes
+                value = '"' + value.replace(/"/g, '""') + '"';
+            } else if (typeof value === 'number') {
+                // Format numbers to a reasonable precision, adjust as needed
+                value = value.toFixed(6); 
+            }
+            row_display_values.push(value);
+        }
+        all_rows.push({
+            raw: row_values_obj,
+            display: row_display_values.join(",")
+        });
+    }
+
+    // Sort rows by Objective (which should now be the last column)
+    // Find the actual field name of the objective column dynamically
+    let objective_field_name_for_sort = null;
+    for (let i = 0; i < columns_meta.length; i++) {
+        if (columns_meta[i].field === "Objective") {
+            objective_field_name_for_sort = columns_meta[i].field;
+            break;
+        }
+    }
+
+    if (objective_field_name_for_sort && all_rows.length > 0) { // Only sort if objective field found and data exists
+        all_rows.sort((a, b) => {
+            const objA = a.raw[objective_field_name_for_sort];
+            const objB = b.raw[objective_field_name_for_sort];
+            if (is_maximizing) {
+                return objB - objA; // Descending for maximization
+            } else {
+                return objA - objB; // Ascending for minimization
+            }
+        });
+    }
+
+    // Append sorted rows to CSV content
+    for (let i = 0; i < all_rows.length; i++) {
+        csv_content += all_rows[i].display + "\\n";
+    }
+
+    const blob = new Blob([csv_content], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    if (link.download !== undefined) { // feature detection
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", file_name);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+"""))
+
+
 # Combine objective name and direction indicator
 objective_row = row(objective_name_input, direction_indicator)
 
@@ -701,14 +825,17 @@ controls_col = column(
     setup_title, num_params_spinner, *param_rows,
     Div(text="<b>Objective Configuration:</b>"),
     objective_row, objective_type_select,
-    initial_data_layout,
+    initial_data_layout, # This layout contains the csv_file_input row
     model_title, row(surrogate_select, acq_func_select),
     lock_setup_button, workflow_title,
     suggest_button, suggestion_div, actual_result_input, submit_result_button,
     reset_button, status_div,
     width=500
 )
-results_col = column(best_result_div, data_table, p_conv)
+
+# Update the results_col layout to include the download button
+results_col = column(best_result_div, data_table, download_csv_button, p_conv) # Added download_csv_button
+
 main_layout = row(controls_col, results_col)
 
 doc.add_root(main_layout)
